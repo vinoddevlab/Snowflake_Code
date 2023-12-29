@@ -1,0 +1,38 @@
+parameters:
+  - name: testparam
+    default: 'test'
+  - name: project_folder
+    default: ''
+  - name: SF_Account
+    default: 'test'
+  - name: SF_UserName
+    default: ''
+  - name: SF_Password
+    default: ''
+  - name: SF_Warehouse
+    default: ''
+  - name : SF_Role
+    default: ''
+  - name : SF_Database
+    default: ''   
+
+steps:
+
+- task:  UsePythonVersion@0
+  displayName: 'Use Python 3.8.x'
+  inputs:
+    versionSpec: '3.8.x'
+- task: Bash@3
+  displayName: 'Deploy Artifacts into Snowflake'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo 'Starting bash task'
+      echo "PROJECT_FOLDER ${{parameters.project_folder}}"
+      python --version
+      echo 'Step 1: Installing schemachange'
+      pip install schemachange --upgrade
+      echo 'Step 2: Running schemachange'
+      schemachange -f ${{parameters.project_folder}}/root_folder -a ${{parameters.SF_Account}} -u ${{parameters.SF_UserName}} -r ${{parameters.SF_Role}} -w ${{parameters.SF_Warehouse}} -d ${{parameters.SF_Database}} -c ${{parameters.SF_Database}}.SCHEMACHANGE.CHANGE_HISTORY --create-change-history-table
+  env:
+    SNOWFLAKE_PASSWORD: ${{parameters.SF_Password}}
