@@ -1,0 +1,403 @@
+CREATE OR REPLACE PROCEDURE EA_STAGING.ETL.USP_FULL_LOAD_DATA_FROM_EXTERNAL_STAGE("RUNID" VARCHAR(16777216), "SOURCE_DATABASE" VARCHAR(25), "SOURCE_SCHEMA" VARCHAR(25), "SOURCE_TABLE" VARCHAR(125), "STAGE_DATABASE" VARCHAR(25), "STAGE_SCHEMA" VARCHAR(25), "STAGE_TABLE" VARCHAR(125), "KEY_COLUMNS" VARCHAR(16777216), "ROWSREAD" VARCHAR(16777216), "ROWSCOPIED" VARCHAR(16777216))
+RETURNS VARCHAR(16777216)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'begin
+declare 
+
+--variables to record the counts
+    v_execution_log variant default object_construct(''rowsRead'',rowsRead,''rowsCopied'',rowsCopied);
+    v_target_row_count integer default 0;
+--variables for table creation
+   v_fully_qualified_name string default STAGE_DATABASE||''.''||STAGE_SCHEMA||''.''||STAGE_TABLE;
+   v_external_stage_location string default ''@STG_AZURE_SQLODS_STAGING/''||SOURCE_DATABASE||''/''||SOURCE_SCHEMA||''/''||SOURCE_TABLE;
+   
+   query_part1 string default ''create or replace table ''||v_fully_qualified_name;
+   query_part2 string default '' using template(select array_agg(object_construct(*)) from table(infer_schema(location=>''''''||v_external_stage_location||'''''','';
+   query_part3 string default '' file_format=>''''FF_PARQUET_ODS_STAGING'''')));'';
+--variables for data load from external stage 
+   v_data_query_1 string default ''copy into ''||v_fully_qualified_name;
+   v_data_query_2 string default '' from ''||v_external_stage_location||'' file_format =(type=parquet) match_by_column_name = case_insensitive on_error=skip_file;'';
+
+--variables for exception handling
+  v_exception exception (-20002, ''An error occurred in procedure: please refer ea_staging.etl.etl_run_detail table for the given runid for error details.'');
+
+begin
+
+ --create table from the external file schema
+  execute immediate :query_part1||:query_part2||:query_part3;
+ 
+ --load data from external file
+  execute immediate :v_data_query_1||v_data_query_2;
+
+ --log query results for audit 
+  select sum(rows_loaded) into v_target_row_count from table(result_scan(last_query_id()));
+ 
+ --log success
+  call EA_STAGING.ETL.USP_LOG_ETL_SUCCESS(:RUNID,object_construct(''source_to_landing'',:v_execution_log,''landing_to_target'',:v_target_row_count));
+         
+Commit;
+return ''1'';
+  exception
+     when other then
+       begin
+        rollback;
+        --log failure
+         call EA_STAGING.ETL.USP_LOG_ETL_FAILURE(:RUNID
+                                                   ,object_construct(
+                                                   ''proc'',''EA_STAGING.ETL.USP_DELTA_LOAD_DATA_FROM_EXTERNAL_STAGE(VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR)''
+                                                   ,''SQLCODE'',:SQLCODE
+                                                   ,''SQLERRM'',:SQLERRM
+                                                   ,''SQLSTATE'',:SQLSTATE
+                                                   )
+                                                  ,object_construct(''source_to_landing'',:v_execution_log,''landing_to_target'',:v_target_row_count)
+                                                  ); 
+        raise v_exception;
+       end;
+    end;
+end';
+
+
+
+
+CREATE OR REPLACE PROCEDURE EA_STAGING.ETL.USP_DELTA_LOAD_DATA_FROM_EXTERNAL_STAGE("RUNID" VARCHAR(16777216), "SOURCE_DATABASE" VARCHAR(25), "SOURCE_SCHEMA" VARCHAR(25), "SOURCE_TABLE" VARCHAR(125), "STAGE_DATABASE" VARCHAR(25), "STAGE_SCHEMA" VARCHAR(25), "STAGE_TABLE" VARCHAR(125), "KEY_COLUMNS" VARCHAR(16777216), "ROWSREAD" VARCHAR(16777216), "ROWSCOPIED" VARCHAR(16777216))
+RETURNS VARCHAR(16777216)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'begin
+declare 
+
+   --variables to record the counts
+   v_execution_log variant default object_construct(''rowsRead'',rowsRead,''rowsCopied'',rowsCopied);
+   v_target_row_count string default '''';
+   --variables for table creation
+   v_fully_qualified_name string default STAGE_DATABASE||''.''||STAGE_SCHEMA||''.tmp_''||STAGE_TABLE;
+   v_fully_qualified_name2 string default STAGE_DATABASE||''.''||STAGE_SCHEMA||''.''||STAGE_TABLE;
+   v_external_stage_location string default ''@EA_STAGING.ETL.STG_AZURE_SQLODS_STAGING/''||SOURCE_DATABASE||''/''||SOURCE_SCHEMA||''/''||SOURCE_TABLE;
+   v_delete_existing string default ''delete from ''||v_fully_qualified_name2||'' where (''||KEY_COLUMNS||'') in ( select ''||KEY_COLUMNS||'' from ''||v_fully_qualified_name||'');'';
+   v_stage_target_load string default ''insert into ''||v_fully_qualified_name2||'' select * from ''||v_fully_qualified_name;
+   v_create_and_populate_target_table string default ''create table ''||v_fully_qualified_name2||'' as select distinct * from ''||v_fully_qualified_name;
+   v_target_columns string default '''';
+   query_part1 string default ''create or replace temporary table ''||v_fully_qualified_name;
+   query_part2 string default '' using template(select array_agg(object_construct(*)) from table(infer_schema(location=>''''''||v_external_stage_location||'''''','';
+   query_part3 string default '' file_format=>''''FF_PARQUET_ODS_STAGING'''')));'';
+   
+--variables for data load from external stage 
+   v_data_query_1 string default ''copy into ''||v_fully_qualified_name;
+   v_data_query_2 string default '' from ''||v_external_stage_location||'' file_format =(type=parquet) match_by_column_name = case_insensitive on_error=skip_file;'';
+
+--variables for schema
+
+v_schema_qry1 string default ''select column_name as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||STAGE_TABLE||'''''')'';
+
+v_schema_qry2 string default ''select column_name as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||''tmp_''||STAGE_TABLE||'''''')'';
+
+--variables for exception handling
+ v_exception exception (-20002, ''An error occurred in procedure: please refer ea_staging.etl.etl_run_detail table for the given runid for error details.'');
+begin
+ 
+ --create  temporary table from using source file  
+ execute immediate :query_part1||:query_part2||:query_part3;
+ --copy data from external file into temp table
+ execute immediate :v_data_query_1||v_data_query_2;
+ --get columns that are exist in both temp and target tables 
+ execute immediate ''select listagg(cols,\\'',\\'') as cols  from (''||  :v_schema_qry1|| '' intersect ''||v_schema_qry2||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols into v_target_columns  from table(result_scan(last_query_id()));
+-- create target table if not exists else load the table from the temp table
+
+
+
+
+if (len(:v_target_columns)=0) then 
+   execute immediate v_create_and_populate_target_table; 
+   execute immediate ''select count(1) as stage_count from '' || v_fully_qualified_name;
+   select stage_count into v_target_row_count from table(result_scan(last_query_id()));
+ else
+  execute immediate :v_delete_existing; 
+  execute immediate  ''insert into ''||v_fully_qualified_name2||''(''||v_target_columns||'')''||'' select ''|| v_target_columns ||'' from ''||v_fully_qualified_name; 
+  select "number of rows inserted" into v_target_row_count from table(result_scan(last_query_id()));
+ end if;
+ 
+ --drop temp tables
+ execute immediate ''drop table if exists ''|| v_fully_qualified_name;
+ --log success
+  call EA_STAGING.ETL.USP_LOG_ETL_SUCCESS(:RUNID,object_construct(''source_to_landing'',:v_execution_log,''landing_to_target'',:v_target_row_count));
+commit;
+
+return ''1'';
+  
+  exception
+     when other then
+       begin
+
+         rollback;
+          
+           call EA_STAGING.ETL.USP_LOG_ETL_FAILURE(:RUNID
+                                                   ,object_construct(
+                                                   ''proc'',''EA_STAGING.ETL.USP_DELTA_LOAD_DATA_FROM_EXTERNAL_STAGE(VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR)''
+                                                   ,''SQLCODE'',:SQLCODE
+                                                   ,''SQLERRM'',:SQLERRM
+                                                   ,''SQLSTATE'',:SQLSTATE
+                                                   )
+                                                  ,object_construct(''source_to_landing'',:v_execution_log,''landing_to_target'',:v_target_row_count)
+                                                  );
+        raise v_exception;
+     
+       end;
+    end;
+end';
+
+
+
+CREATE OR REPLACE PROCEDURE EA_STAGING.ETL.USP_LOG_ETL_SUCCESS("RUNID" VARCHAR(16777216), "EXECUTION_LOG" VARIANT)
+RETURNS NUMBER(38,0)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'BEGIN
+        
+        
+        declare
+            v_watermark_val string default '''';
+            default_watermark_value varchar(75);
+            fullyQualifiedTableName string;
+            watermark_column string;
+            master_unique_id integer;
+            v_key_column_type string default '''';
+            v_stage_db string default '''';
+            v_stage_schema string default '''';
+            v_stage_table string default '''';
+        begin
+
+           
+           select Master_Unique_ID  into :master_unique_id
+            from ea_staging.etl.etl_run_detail
+           where RunID=:RunID;
+           
+  
+           select stage_db
+                 ,stage_schema
+                 ,stage_table 
+                 ,watermark_column
+                 ,default_watermark_value
+                  into :v_stage_db,:v_stage_schema,:v_stage_table,:watermark_column,:default_watermark_value
+            from ea_staging.etl.etl_control_master 
+            where unique_id=:master_unique_id; 
+
+         set fullyQualifiedTableName:=concat(:v_stage_db,''.'',:v_stage_schema,''.'',:v_stage_table);
+         
+         execute immediate ''select DATA_TYPE as Column_Type  from ''||:v_stage_db||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name,column_name))=lower(''''''||:v_stage_db||:v_stage_schema||:v_stage_table||:watermark_column||'''''');'';
+      
+      select Column_Type into :v_key_column_type
+      from table(result_scan(last_query_id())); 
+
+      
+   execute immediate ''select max(''||:watermark_column||'') as watermark from ''||:fullyQualifiedTableName||'';'';
+
+ 
+
+      
+      select 
+                case when left(lower(:v_key_column_type),4) in (''date'',''time'') then 
+                       cast(watermark::string as timestamp_tz(9))::string 
+                  else watermark::string end into :v_watermark_val
+      from table(result_scan(last_query_id())); 
+     
+
+   
+            
+            
+            update ea_staging.etl.etl_run_detail
+               set etl_status=''success'',
+                   execution_log=:EXECUTION_LOG,
+                   etl_end_dts=sysdate(),
+                   watermark_val=nvl(:v_watermark_val,:default_watermark_value)
+             where runid=:runid;
+             
+            
+             
+    return 1;
+    
+    END; 
+END';
+
+
+
+
+
+CREATE OR REPLACE PROCEDURE EA_STAGING.ETL.USP_READ_CONTROL_TABLE_DATA_LOADING("PROJECT" VARCHAR(255), "SOURCE_TABLE" VARCHAR(255))
+RETURNS TABLE ()
+LANGUAGE SQL
+COMMENT='user-defined procedure'
+EXECUTE AS OWNER
+AS 'declare 
+   v_result RESULTSET; 
+begin
+   
+    if (EQUAL_NULL(NULLIF(lower(:SOURCE_TABLE),''na''),null)) then 
+    
+   
+   v_result:=(
+                            
+                select 
+                    a.unique_id
+                   ,replace(source_query,''g$^t'',nvl(b.watermark_val,a.default_watermark_value)) as source_query
+                   ,a.source_db
+                   ,a.source_table
+                   ,a.source_schema
+                   ,a.stage_db
+                   ,a.Stage_schema
+                   ,a.stage_table
+                   ,a.stage_target_query
+                   ,a.watermark_column
+                   ,nvl(b.watermark_val,a.default_watermark_value) as watermark_val
+                   ,nvl(a.key_columns,'''') as key_columns
+                   ,a.post_etl_tasks
+                   ,a.data_archival_flag
+                from EA_Staging.ETL.ETL_Control_Master as a
+                 
+                left outer join 
+                  (
+                    select       
+                       Master_Unique_ID  
+                      ,watermark_val    
+                    from EA_Staging.ETL.ETL_RUN_Detail
+                    where upper(ETL_Status)=''SUCCESS''
+                    and upper(data_load_unload_flag)=''L''
+                    qualify row_number()over(partition by Master_Unique_ID order by etl_start_dts desc)=1
+                  ) as b
+                  
+                  on a.unique_id=b.Master_Unique_ID
+                 where 
+                    a.ISACTIVE=true 
+                    and upper(a.Project)=upper(:project)
+            );
+               else
+               
+             v_result:=(  select 
+                    a.unique_id
+                   ,replace(source_query,''g$^t'',nvl(b.watermark_val,a.default_watermark_value)) as source_query
+                   ,a.source_db
+                    ,a.source_table
+                   ,a.source_schema 
+                   ,a.stage_db
+                   ,a.stage_schema
+                   ,a.stage_table
+                   ,a.stage_target_query
+                   ,a.watermark_column
+                   ,nvl(b.watermark_val,a.default_watermark_value) as watermark_val
+                   ,nvl(a.key_columns,'''') as key_columns
+                   ,a.post_etl_tasks 
+                from EA_Staging.ETL.ETL_Control_Master as a
+                 
+                left outer join 
+                  (
+                    select       
+                       Master_Unique_ID  
+                      ,watermark_val    
+                    from EA_Staging.ETL.ETL_RUN_Detail
+                    where upper(ETL_Status)=''SUCCESS''
+                    and upper(data_load_unload_flag)=''L''
+                    qualify row_number()over(partition by Master_Unique_ID order by etl_start_dts desc)=1
+                  ) as b
+                  
+                  on a.unique_id=b.Master_Unique_ID
+                 where 
+                    a.ISACTIVE=true 
+                    and upper(a.Project)=upper(:PROJECT)
+                    and upper(a.source_table)=upper(:SOURCE_TABLE)
+                     );
+               end if;
+            
+    return table(v_result);
+  end';
+
+
+
+CREATE OR REPLACE PROCEDURE EA_STAGING.ETL.USP_LOG_ETL_START("SOURCETABLE" VARCHAR(255), "PROJECT" VARCHAR(255), "ADF_PIPELINE_RUNID" VARCHAR(16777216), "DATA_LOAD_UNLOAD_FLAG" VARCHAR(2))
+RETURNS NUMBER(38,0)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'begin 
+      declare
+      Master_Unique_ID numeric(38,0);
+      RunID numeric(38,0);
+      begin      
+        set RunID:=random();
+        set Master_Unique_ID:=(
+                               select 
+                                   UNIQUE_ID
+                                  from EA_STAGING.ETL.ETL_CONTROL_MASTER 
+                                 where upper(SOURCE_TABLE)=upper(:SourceTable)
+                                   and upper(PROJECT)=upper(:PROJECT)
+                              );   
+        insert into EA_STAGING.ETL.ETL_RUN_DETAIL
+        (
+          RUNID,
+          MASTER_UNIQUE_ID,
+          ADF_PIPELINE_RUNID,
+          ETL_STATUS,
+          Data_load_unload_Flag
+        )
+        values
+        (
+         :RunID,  
+         :Master_Unique_ID,
+         :ADF_PIPELINE_RUNID,
+         ''InProgress'',
+         :Data_load_unload_Flag
+        );  
+        RETURN :RunID;
+      end;
+      
+end';
+
+
+
+CREATE OR REPLACE PROCEDURE EA_STAGING.ETL.USP_LOG_ETL_FAILURE("RUNID" VARCHAR(16777216), "ERROR_DETAILS" VARIANT, "EXECUTION_LOG" VARIANT)
+RETURNS VARCHAR(25)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'BEGIN
+
+
+declare
+Stage_DB string;
+Stage_Schema string;
+Stage_Table string;
+Watermark_Column string;
+Master_Unique_ID integer;
+begin
+
+select top 1 Master_Unique_ID into Master_Unique_ID From EA_Staging.ETL.ETL_RUN_DETAIL
+  where RunID=:RUNID;
+  
+ Select top 1 Stage_DB
+                                                               ,Stage_Schema
+                                                               ,Stage_Table
+                                                               ,Watermark_Column
+                                                               into :Stage_DB,:Stage_Schema,:Stage_Table,:Watermark_Column
+                                                           from EA_Staging.ETL.ETL_CONTROL_MASTER 
+                                                           where Unique_ID=:Master_Unique_ID;
+                                                       
+
+UPDATE EA_STAGING.ETL.ETL_RUN_DETAIL
+           SET 
+              ETL_STATUS=''FAILED'',
+              ERROR_DETAILS=:ERROR_DETAILS,
+              EXECUTION_LOG=:EXECUTION_LOG,
+              ETL_END_DTS=sysdate()
+          WHERE RUNID=:RUNID; 
+
+--update watermark value 
+call EA_STAGING.ETL.USP_UPDATE_WATERMARK_VALUE(:RUNID,:Stage_DB,:Stage_Schema,:Stage_Table,:Watermark_Column);
+          
+END;     
+            
+END';
+
+
+
+
+
+
