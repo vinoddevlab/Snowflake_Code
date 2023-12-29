@@ -1,0 +1,39 @@
+trigger:
+- none
+stages:
+- stage: Staging
+  displayName: Snowflake Staging
+  variables:
+  - group: snowflake-stage
+  pool:
+   vmImage: ubuntu-latest
+  jobs:
+  - job: Deploy_Snowflake
+    steps:
+     - template: snowflake_deploy_template.yml
+       parameters:
+          project_folder: $(SF_PROJECT_FOLDER)
+          SF_Account: $(SF_ACCOUNT)
+          SF_UserName: $(SF_USERNAME)
+          SF_Password: $(SF_PASSWORD)
+          SF_Warehouse: $(SF_WAREHOUSE)
+          SF_Role: $(SF_ROLE)
+          SF_Database: $(SF_DATABASE)
+- stage: Production
+  displayName: Snowflake Production
+  variables:
+  - group: snowflake-prod
+  pool:
+   vmImage: ubuntu-latest
+  jobs:
+  - job: Deploy_Snowflake
+    steps:
+     - template: snowflake_deploy_template.yml
+       parameters:
+          project_folder: $(SF_PROJECT_FOLDER)
+          SF_Account: $(SF_ACCOUNT)
+          SF_UserName: $(SF_USERNAME)
+          SF_Password: $(SF_PASSWORD)
+          SF_Warehouse: $(SF_WAREHOUSE)
+          SF_Role: $(SF_ROLE)
+          SF_Database: $(SF_DATABASE)
