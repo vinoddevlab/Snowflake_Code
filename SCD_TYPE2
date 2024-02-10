@@ -1,0 +1,749 @@
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_DELTA_LOAD_SCD_TYPE2_INACTIVATE("RUNID" VARCHAR(16777216), "SOURCE_DATABASE" VARCHAR(25), "SOURCE_SCHEMA" VARCHAR(25), "SOURCE_TABLE" VARCHAR(125), "STAGE_DATABASE" VARCHAR(25), "STAGE_SCHEMA" VARCHAR(25), "STAGE_TABLE" VARCHAR(125), "KEY_COLUMNS" VARCHAR(16777216), "UNIQUE_ID" VARCHAR(16777216), "SOURCE_QUERY" VARCHAR(16777216))
+RETURNS VARCHAR(16777216)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'begin
+declare 
+
+   --variables for config values
+   v_unique_id string default ''0'';
+   --variables to record the counts
+  
+   v_target_row_count string default '''';
+   v_total_row_count int default 0;
+   --variables for table creation
+   v_target_table_ddl string default '''';
+   v_fully_qualified_name string default STAGE_DATABASE||''.''||STAGE_SCHEMA||''.tmp_''||STAGE_TABLE;
+   v_fully_qualified_name2 string default STAGE_DATABASE||''.''||STAGE_SCHEMA||''.''||STAGE_TABLE;
+    
+   
+   v_target_columns string default '''';
+   v_create_temp_table string default ''create or replace temporary table ''||v_fully_qualified_name||'' as ''||SOURCE_QUERY;
+ 
+ 
+
+--variables for schema
+
+v_schema_qry1 string default ''select lower(''''"''''||column_name||''''"'''') as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||STAGE_TABLE||'''''')'';
+
+v_schema_qry2 string default ''select lower(''''"''''||column_name||''''"'''') as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||''tmp_''||STAGE_TABLE||'''''')'';
+
+v_schema_qry3 string default ''select lower(''''ifnull("''''||column_name||''''",cast(0 as string))'''') as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||STAGE_TABLE||'''''') and lower(column_name) not in(select  C.value::string as _exclude from arrears_rm.etl.etl_control_master,lateral flatten(input=>split(payload_exclude, '''','''')) C where unique_id=''||UNIQUE_ID||'')'';
+ 
+v_schema_qry4 string default ''select lower(''''ifnull("''''||column_name||''''",cast(0 as string))'''') as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||''tmp_''||STAGE_TABLE||'''''')'';
+
+v_schema_for_hashing string default '''';
+
+--variables for exception handling
+ v_exception exception (-20002, ''An error occurred in procedure: please refer arrears_rm.etl.etl_run_detail table for the given runid for error details.'');
+
+ begin
+ 
+ 
+ --create  temporary table from using source file  
+ execute immediate :v_create_temp_table; 
+ --add _runid column
+ execute immediate ''alter table ''||v_fully_qualified_name||'' add column if not exists _runid string'';
+ --update value with the current runid
+execute immediate ''update ''||v_fully_qualified_name||'' set _runid=''||RUNID;
+ --log record count from staging table
+  execute immediate ''select count(1) as stage_count from '' || v_fully_qualified_name;
+  select stage_count into v_target_row_count from table(result_scan(last_query_id()));
+ 
+ --get columns that are exist in both staging and target tables 
+ execute immediate ''select listagg(cols,\\'',\\'') as cols  from (''||  :v_schema_qry1|| '' intersect ''||v_schema_qry2||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols into v_target_columns  from table(result_scan(last_query_id()));
+
+ execute immediate ''select listagg(cols,\\'',\\'') as cols_for_hash  from (''||  :v_schema_qry3|| '' intersect ''||v_schema_qry4||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols_for_hash into v_schema_for_hashing  from table(result_scan(last_query_id()));
+
+  
+ 
+ -- create target table if not exists
+if (len(:v_target_columns)=0) then 
+
+    --create table if not exists
+      execute immediate ''select get_ddl(''''table'''',''''''||v_fully_qualified_name||'''''') as ddl''; 
+      select ddl into v_target_table_ddl from table(result_scan(last_query_id()));
+      set v_target_table_ddl:=replace(:v_target_table_ddl,'');'','',_key char(66),_rowid integer identity(1,1),start_dts timestamp_ntz(9) 
+                              default(current_timestamp()),end_dts timestamp_ntz(9) default(to_date(''''9999-12-31'''')) );'');
+    set v_target_table_ddl:=replace(lower(:v_target_table_ddl),concat(''create or replace temporary table tmp_'',lower(:stage_table)),concat(''create table '',lower(:v_fully_qualified_name2)));
+
+    
+    execute immediate :v_target_table_ddl;
+   
+    
+ end if;
+
+
+ --get columns that are exist in both staging and target tables 
+ execute immediate ''select listagg(cols,\\'',\\'') as cols  from (''||  :v_schema_qry1|| '' intersect ''||v_schema_qry2||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols into v_target_columns  from table(result_scan(last_query_id()));
+
+ execute immediate ''select listagg(cols,\\'',\\'') as cols_for_hash  from (''||  :v_schema_qry3|| '' intersect ''||v_schema_qry4||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols_for_hash into v_schema_for_hashing  from table(result_scan(last_query_id()));
+ 
+ 
+execute immediate ''insert into ''||v_fully_qualified_name2||''(''||:v_target_columns||'',_key)''||'' select distinct ''|| :v_target_columns ||'',arrears_rm.etl.udf_generateHash(concat(''||KEY_COLUMNS||'')) as _key from ''||v_fully_qualified_name ||'' where 
+  arrears_rm.etl.udf_generateHash(concat(''||:v_schema_for_hashing||'')) not in (select arrears_rm.etl.udf_generateHash(concat(''||:v_schema_for_hashing||'')) from ''||v_fully_qualified_name2||'' where 
+   end_dts>current_date())''; 
+
+  select "number of rows inserted" into v_target_row_count from table(result_scan(last_query_id()));
+  
+  
+
+
+execute immediate ''update ''||v_fully_qualified_name2 ||'' as a
+    set a.end_dts=dateadd(day,-1,b.start_dts)
+    from (
+           select ''||
+                ''_key
+               ,_rowid
+               ,lead(start_DTS,1,''''9999-12-31'''') over (partition by ''|| KEY_COLUMNS ||'' order by start_dts,_rowid ) as start_dts
+           from ''|| v_fully_qualified_name2 ||''
+            where (''|| KEY_COLUMNS ||'') in (select ''|| KEY_COLUMNS ||'' from ''|| v_fully_qualified_name2 ||'' where _runid=cast(''||runid||'' as string))''||
+     '') b
+     where a._rowid = b._rowid
+       and a._key=b._key  
+       and a.end_dts>current_date()'';
+
+
+ execute immediate ''update ''||v_fully_qualified_name2 ||''
+    set end_dts=dateadd(day,-1,sysdate())
+     where (''|| KEY_COLUMNS ||'') not in ( 
+           select ''|| KEY_COLUMNS ||
+                '' from ''|| v_fully_qualified_name ||''
+              ) and end_dts>current_date()'';      
+ 
+ --log total record count
+execute immediate ''select count(1) as row_count from ''||v_fully_qualified_name2;
+select row_count into v_total_row_count from table(result_scan(last_query_id()));
+ 
+ --drop temp tables
+ execute immediate ''drop table if exists ''|| v_fully_qualified_name;
+ 
+ --log success
+   call arrears_rm.etl.usp_log_etl_success(:RUNID,object_construct(''source_to_target'',:v_target_row_count,''current_target_row_count'',:v_total_row_count));
+commit;
+
+return ''success'';
+  
+  exception
+     when other then
+       begin
+
+         rollback;
+          
+           call arrears_rm.etl.USP_LOG_ETL_FAILURE(:RUNID
+                                                   ,object_construct(
+                                                   ''proc'',''arrears_rm.etl.USP_DELTA_LOAD_DATA_FROM_EXTERNAL_STAGE_SCD_TYPE2((VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR)''
+                                                   ,''SQLCODE'',:SQLCODE
+                                                   ,''SQLERRM'',:SQLERRM
+                                                   ,''SQLSTATE'',:SQLSTATE
+                                                   )
+                                                  ,object_construct(''source_to_target'',:v_target_row_count,''current_target_row_count'',:v_total_row_count)
+                                                  );
+       
+       --drop temp tables
+         execute immediate ''drop table if exists ''|| v_fully_qualified_name; 
+        -- return :SQLERRM;
+       raise v_exception;
+      
+       end;
+    end;
+end';
+
+
+
+
+
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_DELTA_LOAD_SCD_TYPE2("RUNID" VARCHAR(16777216), "SOURCE_DATABASE" VARCHAR(25), "SOURCE_SCHEMA" VARCHAR(25), "SOURCE_TABLE" VARCHAR(125), "STAGE_DATABASE" VARCHAR(25), "STAGE_SCHEMA" VARCHAR(25), "STAGE_TABLE" VARCHAR(125), "KEY_COLUMNS" VARCHAR(16777216), "UNIQUE_ID" VARCHAR(16777216), "SOURCE_QUERY" VARCHAR(16777216))
+RETURNS VARCHAR(16777216)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'begin
+declare 
+
+   --variables for config values
+   v_unique_id string default ''0'';
+   --variables to record the counts
+  
+   v_target_row_count string default '''';
+   v_total_row_count int default 0;
+   --variables for table creation
+   v_target_table_ddl string default '''';
+   v_fully_qualified_name string default STAGE_DATABASE||''.''||STAGE_SCHEMA||''.tmp_''||STAGE_TABLE;
+   v_fully_qualified_name2 string default STAGE_DATABASE||''.''||STAGE_SCHEMA||''.''||STAGE_TABLE;
+    
+   
+   v_target_columns string default '''';
+   v_create_temp_table string default ''create or replace temporary table ''||v_fully_qualified_name||'' as ''||SOURCE_QUERY;
+ 
+ 
+
+--variables for schema
+
+v_schema_qry1 string default ''select lower(''''"''''||column_name||''''"'''') as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||STAGE_TABLE||'''''')'';
+
+v_schema_qry2 string default ''select lower(''''"''''||column_name||''''"'''') as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||''tmp_''||STAGE_TABLE||'''''')'';
+
+v_schema_qry3 string default ''select lower(''''ifnull("''''||column_name||''''",cast(0 as string))'''') as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||STAGE_TABLE||'''''') and lower(column_name) not in(select  C.value::string as _exclude from arrears_rm.etl.etl_control_master,lateral flatten(input=>split(payload_exclude, '''','''')) C where unique_id=''||UNIQUE_ID||'')'';
+ 
+v_schema_qry4 string default ''select lower(''''ifnull("''''||column_name||''''",cast(0 as string))'''') as cols  from ''||STAGE_DATABASE||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name))=lower(''''''||STAGE_DATABASE||STAGE_SCHEMA||''tmp_''||STAGE_TABLE||'''''')'';
+
+v_schema_for_hashing string default '''';
+
+--variables for exception handling
+ v_exception exception (-20002, ''An error occurred in procedure: please refer arrears_rm.etl.etl_run_detail table for the given runid for error details.'');
+
+ begin
+ 
+ 
+ --create  temporary table from using source file  
+ execute immediate :v_create_temp_table; 
+ --add _runid column
+ execute immediate ''alter table ''||v_fully_qualified_name||'' add column if not exists _runid string'';
+ --update value with the current runid
+execute immediate ''update ''||v_fully_qualified_name||'' set _runid=''||RUNID;
+ --log record count from staging table
+  execute immediate ''select count(1) as stage_count from '' || v_fully_qualified_name;
+  select stage_count into v_target_row_count from table(result_scan(last_query_id()));
+ 
+ --get columns that are exist in both staging and target tables 
+ execute immediate ''select listagg(cols,\\'',\\'') as cols  from (''||  :v_schema_qry1|| '' intersect ''||v_schema_qry2||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols into v_target_columns  from table(result_scan(last_query_id()));
+
+ execute immediate ''select listagg(cols,\\'',\\'') as cols_for_hash  from (''||  :v_schema_qry3|| '' intersect ''||v_schema_qry4||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols_for_hash into v_schema_for_hashing  from table(result_scan(last_query_id()));
+
+  
+ 
+ -- create target table if not exists
+if (len(:v_target_columns)=0) then 
+
+    --create table if not exists
+      execute immediate ''select get_ddl(''''table'''',''''''||v_fully_qualified_name||'''''') as ddl''; 
+      select ddl into v_target_table_ddl from table(result_scan(last_query_id()));
+      set v_target_table_ddl:=replace(:v_target_table_ddl,'');'','',_key char(66),_rowid integer identity(1,1),start_dts timestamp_ntz(9) 
+                              default(current_timestamp()),end_dts timestamp_ntz(9) default(to_date(''''9999-12-31'''')) );'');
+    set v_target_table_ddl:=replace(lower(:v_target_table_ddl),concat(''create or replace temporary table tmp_'',lower(:stage_table)),concat(''create table '',lower(:v_fully_qualified_name2)));
+
+    
+    execute immediate :v_target_table_ddl;
+   
+    
+ end if;
+
+
+ --get columns that are exist in both staging and target tables 
+ execute immediate ''select listagg(cols,\\'',\\'') as cols  from (''||  :v_schema_qry1|| '' intersect ''||v_schema_qry2||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols into v_target_columns  from table(result_scan(last_query_id()));
+
+ execute immediate ''select listagg(cols,\\'',\\'') as cols_for_hash  from (''||  :v_schema_qry3|| '' intersect ''||v_schema_qry4||'') as qry1''; 
+ --assign the result of above query into a variable
+ select cols_for_hash into v_schema_for_hashing  from table(result_scan(last_query_id()));
+ 
+ 
+execute immediate ''insert into ''||v_fully_qualified_name2||''(''||:v_target_columns||'',_key)''||'' select distinct ''|| :v_target_columns ||'',arrears_rm.etl.udf_generateHash(concat(''||KEY_COLUMNS||'')) as _key from ''||v_fully_qualified_name ||'' where 
+  arrears_rm.etl.udf_generateHash(concat(''||:v_schema_for_hashing||'')) not in (select arrears_rm.etl.udf_generateHash(concat(''||:v_schema_for_hashing||'')) from ''||v_fully_qualified_name2||'' where 
+   end_dts>current_date())''; 
+
+  select "number of rows inserted" into v_target_row_count from table(result_scan(last_query_id()));
+  
+  
+
+
+execute immediate ''update ''||v_fully_qualified_name2 ||'' as a
+    set a.end_dts=dateadd(day,-1,b.start_dts)
+    from (
+           select ''||
+                ''_key
+               ,_rowid
+               ,lead(start_DTS,1,''''9999-12-31'''') over (partition by ''|| KEY_COLUMNS ||'' order by start_dts,_rowid ) as start_dts
+           from ''|| v_fully_qualified_name2 ||''
+            where (''|| KEY_COLUMNS ||'') in (select ''|| KEY_COLUMNS ||'' from ''|| v_fully_qualified_name2 ||'' where _runid=cast(''||runid||'' as string))''||
+     '') b
+     where a._rowid = b._rowid
+       and a._key=b._key  
+       and a.end_dts>current_date()'';
+ 
+ --log total record count
+execute immediate ''select count(1) as row_count from ''||v_fully_qualified_name2;
+select row_count into v_total_row_count from table(result_scan(last_query_id()));
+ 
+ --drop temp tables
+ execute immediate ''drop table if exists ''|| v_fully_qualified_name;
+ 
+ --log success
+   call arrears_rm.etl.usp_log_etl_success(:RUNID,object_construct(''source_to_target'',:v_target_row_count,''current_target_row_count'',:v_total_row_count));
+commit;
+
+return ''success'';
+  
+  exception
+     when other then
+       begin
+
+         rollback;
+          
+           call arrears_rm.etl.USP_LOG_ETL_FAILURE(:RUNID
+                                                   ,object_construct(
+                                                   ''proc'',''arrears_rm.etl.USP_DELTA_LOAD_DATA_FROM_EXTERNAL_STAGE_SCD_TYPE2((VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR,VARCHAR)''
+                                                   ,''SQLCODE'',:SQLCODE
+                                                   ,''SQLERRM'',:SQLERRM
+                                                   ,''SQLSTATE'',:SQLSTATE
+                                                   )
+                                                  ,object_construct(''source_to_target'',:v_target_row_count,''current_target_row_count'',:v_total_row_count)
+                                                  );
+       
+       --drop temp tables
+         execute immediate ''drop table if exists ''|| v_fully_qualified_name; 
+         
+       raise v_exception;
+      
+       end;
+    end;
+end';
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_EMPTY()
+RETURNS VARCHAR(16777216)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'begin
+ --this procedure is used as a default value in case of no implementation, this is to pass the mandatory params in ADF pipeline
+   return 1;
+end';
+
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_LOG_ETL_FAILURE("RUNID" VARCHAR(16777216), "ERROR_DETAILS" VARIANT, "EXECUTION_LOG" VARIANT)
+RETURNS VARCHAR(25)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'BEGIN
+
+
+declare
+Stage_DB string;
+Stage_Schema string;
+Stage_Table string;
+Watermark_Column string;
+Master_Unique_ID integer;
+begin
+
+select top 1 Master_Unique_ID into Master_Unique_ID From ARREARS_RM.ETL.ETL_RUN_DETAIL
+  where RunID=:RUNID;
+  
+ Select top 1 Stage_DB
+                                                               ,Stage_Schema
+                                                               ,Stage_Table
+                                                               ,Watermark_Column
+                                                               into :Stage_DB,:Stage_Schema,:Stage_Table,:Watermark_Column
+                                                           from ARREARS_RM.ETL.ETL_CONTROL_MASTER 
+                                                           where Unique_ID=:Master_Unique_ID;
+                                                       
+
+UPDATE ARREARS_RM.ETL.ETL_RUN_DETAIL
+           SET 
+              ETL_STATUS=''fail'',
+              ERROR_DETAILS=:ERROR_DETAILS,
+              EXECUTION_LOG=:EXECUTION_LOG,
+              ETL_END_DTS=sysdate()
+          WHERE RUNID=:RUNID; 
+          
+END;     
+            
+END';
+
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_LOG_ETL_NODATA("RUNID" VARCHAR(16777216))
+RETURNS NUMBER(38,0)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'BEGIN
+
+         declare
+            Stage_DB string;
+            Stage_Schema string;
+            Stage_Table string;
+            Watermark_Column string;
+            Master_Unique_ID integer;
+        begin
+
+           select Master_Unique_ID  into :Master_Unique_ID
+                                   From ARREARS_RM.ETL.ETL_RUN_DETAIL
+                                  where RunID=:RunID;
+           
+                                
+  
+           Select Stage_DB  
+                 ,Stage_Schema 
+                 ,Stage_Table 
+                 ,Watermark_Column into :Stage_DB,:Stage_Schema,:Stage_Table,:Watermark_Column
+            from ARREARS_RM.ETL.ETL_CONTROL_MASTER 
+            where Unique_ID=:Master_Unique_ID; 
+ 
+            update
+             ARREARS_RM.ETL.ETL_RUN_DETAIL
+              set ETL_STATUS=''nodata'',
+                  ETL_END_DTS=sysdate() 
+              where RUNID=:RUNID; 
+     return 1;      
+
+     END;
+END';
+
+
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_LOG_ETL_START("STAGE_TABLE" VARCHAR(255), "PROJECT" VARCHAR(255), "ADF_PIPELINE_RUNID" VARCHAR(16777216), "DATA_LOAD_UNLOAD_FLAG" VARCHAR(2))
+RETURNS NUMBER(38,0)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'begin 
+      declare
+      Master_Unique_ID numeric(38,0);
+      RunID numeric(38,0);
+      begin      
+        set RunID:=random();
+        set Master_Unique_ID:=(
+                               select 
+                                   UNIQUE_ID
+                                  from ARREARS_RM.ETL.ETL_CONTROL_MASTER 
+                                 where upper(STAGE_TABLE)=upper(:STAGE_TABLE)
+                                   and upper(PROJECT)=upper(:PROJECT)
+                              );   
+        insert into ARREARS_RM.ETL.ETL_RUN_DETAIL
+        (
+          RUNID,
+          MASTER_UNIQUE_ID,
+          ADF_PIPELINE_RUNID,
+          ETL_STATUS,
+          Data_load_unload_Flag
+        )
+        values
+        (
+         :RunID,  
+         :Master_Unique_ID,
+         :ADF_PIPELINE_RUNID,
+         ''InProgress'',
+         :Data_load_unload_Flag
+        );  
+        RETURN :RunID;
+      end;
+      
+end';
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_LOG_ETL_SUCCESS("RUNID" VARCHAR(16777216), "EXECUTION_LOG" VARIANT)
+RETURNS NUMBER(38,0)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS 'BEGIN
+        
+        
+        declare
+            v_watermark_val string default '''';
+            default_watermark_value varchar(75);
+            fullyQualifiedTableName string;
+            watermark_column string;
+            master_unique_id integer;
+            v_key_column_type string default '''';
+            v_stage_db string default '''';
+            v_stage_schema string default '''';
+            v_stage_table string default '''';
+        begin
+
+           
+          select Master_Unique_ID  into :master_unique_id
+            from arrears_rm.etl.etl_run_detail
+           where RunID=:RunID;
+           
+  
+           select stage_db
+                 ,stage_schema
+                 ,stage_table 
+                 ,watermark_column
+                 ,default_watermark_value
+                  into :v_stage_db,:v_stage_schema,:v_stage_table,:watermark_column,:default_watermark_value
+            from arrears_rm.etl.etl_control_master 
+            where unique_id=:master_unique_id; 
+
+         set fullyQualifiedTableName:=concat(:v_stage_db,''.'',:v_stage_schema,''.'',:v_stage_table);
+         
+         execute immediate ''select DATA_TYPE as Column_Type  from ''||:v_stage_db||''.information_schema.columns where lower(concat(table_catalog,table_schema,table_name,column_name))=lower(''''''||:v_stage_db||:v_stage_schema||:v_stage_table||:watermark_column||'''''');'';
+      
+      select Column_Type into :v_key_column_type
+      from table(result_scan(last_query_id())); 
+
+      
+    execute immediate ''select max(''||:watermark_column||'') as watermark from ''||:fullyQualifiedTableName||'';'';
+
+ 
+
+      
+      select 
+                case when left(lower(:v_key_column_type),4) in (''date'',''time'') then 
+                       cast(watermark::string as timestamp_tz(9))::string 
+                  else watermark::string end into :v_watermark_val
+      from table(result_scan(last_query_id())); 
+     
+
+   
+            
+            
+            update arrears_rm.etl.etl_run_detail
+               set etl_status=''success'',
+                   execution_log=:EXECUTION_LOG,
+                   etl_end_dts=sysdate(),
+                   watermark_val=nvl(:v_watermark_val,:default_watermark_value)
+             where runid=:runid;
+             
+            
+             
+    return 1;
+    
+    END; 
+END';
+
+
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_READ_CONTROL_TABLE_DATA_LOADING("PROJECT" VARCHAR(255), "SOURCE_TABLE" VARCHAR(255))
+RETURNS TABLE ()
+LANGUAGE SQL
+COMMENT='data loading from source into snowflake, source_query = null and isactive=true means they are loading in snowflake using transformations but not using ADF. hence we are only fetching the records having source_query is not null.'
+EXECUTE AS OWNER
+AS 'declare 
+   v_result RESULTSET; 
+begin
+   
+    if (EQUAL_NULL(NULLIF(lower(:SOURCE_TABLE),''na''),null)) then 
+    
+   
+   v_result:=(
+                            
+                select 
+                    a.unique_id
+                   ,replace(source_query,''g$^t'',nvl(b.watermark_val,a.default_watermark_value)) as source_query
+                   ,a.source_db
+                   ,a.source_table
+                   ,a.source_schema
+                   ,a.stage_db
+                   ,a.Stage_schema
+                   ,a.stage_table
+                   ,a.stage_target_query
+                   ,a.watermark_column
+                   ,nvl(b.watermark_val,a.default_watermark_value) as watermark_val
+                   ,nvl(a.key_columns,'''') as key_columns
+                   ,a.post_etl_tasks
+                   ,a.data_archival_flag
+                from ARREARS_RM.ETL.ETL_Control_Master as a
+                 
+                left outer join 
+                  (
+                    select       
+                       Master_Unique_ID  
+                      ,watermark_val    
+                    from ARREARS_RM.ETL.ETL_RUN_Detail
+                    where upper(ETL_Status)=''SUCCESS''
+                    and upper(data_load_unload_flag)=''L''
+                    qualify row_number()over(partition by Master_Unique_ID order by etl_start_dts desc)=1
+                  ) as b
+                  
+                  on a.unique_id=b.Master_Unique_ID
+                 where 
+                    a.ISACTIVE=true 
+                    and upper(a.Project)=upper(:project)
+                    and a.source_query is not null  -- this is to skip records for the tables which are loading using the transformations is snowflake but not using data factory
+            );
+               else
+               
+             v_result:=(  select 
+                    a.unique_id
+                   ,replace(source_query,''g$^t'',nvl(b.watermark_val,a.default_watermark_value)) as source_query
+                   ,a.source_db
+                    ,a.source_table
+                   ,a.source_schema 
+                   ,a.stage_db
+                   ,a.stage_schema
+                   ,a.stage_table
+                   ,a.stage_target_query
+                   ,a.watermark_column
+                   ,nvl(b.watermark_val,a.default_watermark_value) as watermark_val
+                   ,nvl(a.key_columns,'''') as key_columns
+                   ,a.post_etl_tasks 
+                from ARREARS_RM.ETL.ETL_Control_Master as a
+                 
+                left outer join 
+                  (
+                    select       
+                       Master_Unique_ID  
+                      ,watermark_val    
+                    from ARREARS_RM.ETL.ETL_RUN_Detail
+                    where upper(ETL_Status)=''SUCCESS''
+                    and upper(data_load_unload_flag)=''L''
+                    qualify row_number()over(partition by Master_Unique_ID order by etl_start_dts desc)=1
+                  ) as b
+                  
+                  on a.unique_id=b.Master_Unique_ID
+                 where 
+                    a.ISACTIVE=true 
+                    and upper(a.Project)=upper(:PROJECT)
+                    and upper(a.source_table)=upper(:SOURCE_TABLE)
+                    and a.source_query is not null
+                     );
+               end if;
+            
+    return table(v_result);
+  end';
+
+
+
+
+
+CREATE OR REPLACE PROCEDURE ARREARS_RM.ETL.USP_READ_CONTROL_TABLE_DATA_UNLOADING("PROJECT" VARCHAR(255), "SOURCE_TABLE" VARCHAR(255))
+RETURNS TABLE ()
+LANGUAGE SQL
+COMMENT='user-defined procedure'
+EXECUTE AS OWNER
+AS 'declare 
+   v_result RESULTSET; 
+begin
+   
+    if (EQUAL_NULL(NULLIF(lower(:SOURCE_TABLE),''na''),null)) then 
+    
+   
+   v_result:=(
+                            
+                select 
+                    a.unique_id
+                   ,a.project
+                   ,a.source_table
+                   ,a.stage_db
+                   ,a.Stage_schema
+                   ,a.stage_table
+                from ARREARS_RM.ETL.ETL_Control_Master as a 
+                 where
+                     a.DATA_ARCHIVAL_FLAG=true
+                    and upper(a.Project)=upper(:project)
+            );
+               else
+               
+             v_result:=(  select 
+                    a.unique_id
+                   ,a.project
+                   ,a.source_table
+                   ,a.stage_db
+                   ,a.Stage_schema
+                   ,a.stage_table
+                from ARREARS_RM.ETL.ETL_Control_Master as a 
+                 where 
+                       
+                     a.DATA_ARCHIVAL_FLAG=true
+                    and upper(a.Project)=upper(:PROJECT)
+                    and upper(a.source_table)=upper(:SOURCE_TABLE)
+                     );
+               end if;
+            
+    return table(v_result);
+  end';
+
+
+
+
+
+create or replace TABLE ARREARS_RM.ETL.ETL_CONTROL_MASTER (
+	UNIQUE_ID NUMBER(38,0) autoincrement start 1 increment 1 order,
+	PROJECT VARCHAR(16777216) COMMENT 'to group related tables, and run them once as a ETL trigger',
+	SOURCE_QUERY VARCHAR(4000) COMMENT 'source query to extract data from the source, can be customised',
+	SOURCE_DB VARCHAR(50) COMMENT 'source database',
+	SOURCE_SCHEMA VARCHAR(125) COMMENT 'source schema',
+	SOURCE_TABLE VARCHAR(125) COMMENT 'source table',
+	STAGE_DB VARCHAR(50) COMMENT 'stage database, can also be used as target in snowflake when unloading data from the source',
+	STAGE_SCHEMA VARCHAR(25) COMMENT 'stage schema',
+	STAGE_TABLE VARCHAR(125) COMMENT 'stage table',
+	STAGE_TARGET_QUERY VARCHAR(16777216) DEFAULT 'call EA_STAGING.ETL.USP_EMPTY(?,?);' COMMENT 'query used to load data from staging/landing to target table',
+	WATERMARK_COLUMN VARCHAR(16777216) COMMENT 'columns used to detect the changes (CDC) in the source',
+	DEFAULT_WATERMARK_VALUE VARCHAR(75) COMMENT 'default value when loading first time',
+	KEY_COLUMNS VARCHAR(16777216) COMMENT 'these columns are used to uniquely identify the records and they are also used to dedupe the target data for SCD type 1',
+	PAYLOAD_INCLUDE VARCHAR(16777216) COMMENT 'columns to be included in loading the target table also in the hashing value to detect changes',
+	PAYLOAD_EXCLUDE VARCHAR(16777216) COMMENT 'columns to be excluded while generating hashing value to detect changes',
+	POST_ETL_TASKS VARCHAR(16777216) DEFAULT 'CALL ARREARS_RM.ETL.USP_EMPTY(?,?);' COMMENT 'tasks to be performed when loading data into staging/target table , like refresh dynamic tables/external tables/tasks/datamard refresh',
+	ISACTIVE BOOLEAN DEFAULT TRUE COMMENT 'this will be activate/deactivate the table from loading from the source',
+	CREATED_ON TIMESTAMP_NTZ(9) DEFAULT CAST(CAST(CONVERT_TIMEZONE('UTC', CAST(CURRENT_TIMESTAMP() AS TIMESTAMP_TZ(9))) AS TIMESTAMP_NTZ(9)) AS TIMESTAMP_NTZ(9)),
+	MODIFIED_ON TIMESTAMP_NTZ(9) DEFAULT CAST(CAST(CONVERT_TIMEZONE('UTC', CAST(CURRENT_TIMESTAMP() AS TIMESTAMP_TZ(9))) AS TIMESTAMP_NTZ(9)) AS TIMESTAMP_NTZ(9)),
+	MODIFIED_BY VARCHAR(16777216) DEFAULT CURRENT_USER(),
+	EXECUTION_ORDER NUMBER(38,0) DEFAULT 9999 COMMENT 'specify if required to be run in a sequence.',
+	DATA_RETENTION_VALUE NUMBER(38,0) COMMENT 'This is the number of units of time that you want to add. For example, if you want to add 2 days, this will be 2.',
+	DATA_RETENTION_DATE_TIME_PART VARCHAR(50) COMMENT 'This indicates the units of time that you want to add. For example if you want to add 2 days, then this will be DAY. This unit of measure must be one of the values listed in Supported Date and Time Parts.',
+	DATA_ARCHIVAL_COLUMN VARCHAR(125) COMMENT 'column to be used for data archival.',
+	DATA_ARCHIVAL_FLAG BOOLEAN DEFAULT FALSE COMMENT 'Set Flag to enable/disable data archival for the given table.',
+	RECORD_DESCRIPTION VARCHAR(16777216) COMMENT 'this column describe some useful details about this config record.',
+	OLD_UNIQUE_ID NUMBER(38,0)
+)COMMENT='A control table in ETL (Extract, Transform, Load) is a specialized table that serves as a central repository for storing information about the ETL process and its execution. It plays a crucial role in orchestrating the ETL pipeline, ensuring data consistency and traceability'
+;
+
+
+create or replace TABLE ARREARS_RM.ETL.ETL_RUN_DETAIL (
+	RUNID NUMBER(38,0),
+	MASTER_UNIQUE_ID NUMBER(38,0),
+	ETL_START_DTS TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+	ETL_END_DTS TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+	ETL_STATUS VARCHAR(25),
+	ERROR_DETAILS VARIANT,
+	EXECUTION_LOG VARIANT,
+	ADF_PIPELINE_RUNID VARCHAR(125),
+	WATERMARK_VAL VARCHAR(75),
+	DATA_LOAD_UNLOAD_FLAG VARCHAR(2)
+);
+
+
+
+
+CREATE OR REPLACE FUNCTION ARREARS_RM.ETL.UDF_GENERATEHASH("P_KEY" VARCHAR(16777216))
+RETURNS VARCHAR(64)
+LANGUAGE SQL
+AS '
+    select sha2(p_Key)
+        
+  ';
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
